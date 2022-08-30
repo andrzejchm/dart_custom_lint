@@ -81,8 +81,11 @@ class CustomLintRunner {
         contextRoot.root.path,
         contextRoot.root
             .getChildren()
-            .where((element) =>
-                !element.path.endsWith('test') && !element.path.endsWith('lib'))
+            .where((element) {
+              final isTestOrLib =
+                  element.path.endsWith('test') || element.path.endsWith('lib');
+              return !isTestOrLib || element.path.contains('ios/.symlinks');
+            })
             .map((e) => e.path)
             .toList(),
         optionsFile: contextRoot.optionsFile?.path,
