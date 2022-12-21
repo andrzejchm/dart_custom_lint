@@ -2,13 +2,95 @@
 /// but that custom_lint defines
 library custom_protocol;
 
-import 'dart:convert';
+import 'dart:convert' show json;
 
 import 'package:analyzer_plugin/protocol/protocol.dart';
+import 'package:analyzer_plugin/protocol/protocol_common.dart';
+import 'package:analyzer_plugin/protocol/protocol_generated.dart';
 // ignore: implementation_imports
-import 'package:analyzer_plugin/src/protocol/protocol_internal.dart'
-    show RequestParams, ResponseResult;
+import 'package:analyzer_plugin/src/protocol/protocol_internal.dart';
 import 'package:meta/meta.dart';
+
+import 'public_protocol.dart';
+
+/// Information about an `// expect_lint: code` clause
+@immutable
+class ExpectLintMeta {
+  /// Information about an `// expect_lint: code` clause
+  const ExpectLintMeta({
+    required this.line,
+    required this.code,
+    required this.location,
+  }) : assert(line >= 0, 'line must be positive');
+
+  /// Decode [ExpectLintMeta] from a [Map].
+  factory ExpectLintMeta.fromJson(Map<String, Object?> json) {
+    return ExpectLintMeta(
+      line: json['line']! as int,
+      code: json['code']! as String,
+      location: LintLocation.fromLocation(
+        Location.fromJson(
+          ResponseDecoder(null),
+          'location',
+          json['location'],
+        ),
+      ),
+    );
+  }
+
+  /// A 0-based offset of the line having the expect_lint clause.
+  final int line;
+
+  /// The code expected.
+  final String code;
+
+  /// The location of the expected code.
+  final LintLocation location;
+
+  /// Serializes this object.
+  Map<String, Object?> toJson() {
+    return {
+      'line': line,
+      'code': code,
+      'location': location.asLocation().toJson()
+    };
+  }
+}
+
+/// A wrapper around [AnalysisErrorsParams] to include [ExpectLintMeta].
+class CustomAnalysisNotification {
+  /// A wrapper around [AnalysisErrorsParams] to include [ExpectLintMeta].
+  CustomAnalysisNotification(this.lints, this.expectLints);
+
+  /// Decode [CustomAnalysisNotification] from a [Notification].
+  factory CustomAnalysisNotification.fromNotification(
+    Notification notification,
+  ) {
+    return CustomAnalysisNotification(
+      AnalysisErrorsParams.fromNotification(notification),
+      (notification.params!['expect_lints'] as List?)
+              ?.cast<Map>()
+              .map((e) => ExpectLintMeta.fromJson(Map.from(e)))
+              .toList() ??
+          [],
+    );
+  }
+
+  /// The lints emitted, without any regards to expect_lint clauses.
+  final AnalysisErrorsParams lints;
+
+  /// The expect_lints clauses in the file.
+  final List<ExpectLintMeta> expectLints;
+
+  /// Encodes the object.
+  Map<String, Object> toJson() => {
+        ...lints.toJson(),
+        'expect_lints': expectLints.map((e) => e.toJson()).toList()
+      };
+
+  /// Converts the object into a [Notification].
+  Notification toNotification() => Notification('analysis.errors', toJson());
+}
 
 /// Notification for when a plugin invokes [print].
 @immutable
@@ -44,7 +126,7 @@ class PrintNotification {
 /// {@endtemplate}
 class AwaitAnalysisDoneParams implements RequestParams {
   /// {@macro custom_lint.protocol.get_analysis_error_params}
-  const AwaitAnalysisDoneParams();
+  const AwaitAnalysisDoneParams({required this.reload});
 
   /// Decodes a [AwaitAnalysisDoneParams] from a [Request].
   factory AwaitAnalysisDoneParams.fromRequest(Request request) {
@@ -53,14 +135,17 @@ class AwaitAnalysisDoneParams implements RequestParams {
       'Notification is not a $key notification',
     );
 
-    return const AwaitAnalysisDoneParams();
+    return AwaitAnalysisDoneParams(reload: request.params['reload']! as bool);
   }
 
   /// The unique [Request.method] for a [AwaitAnalysisDoneParams].
   static const key = 'custom_lint.await_analysis_done';
 
+  /// Whether to invalidate / rerun the linting process due to reload
+  final bool reload;
+
   @override
-  Map<String, Object> toJson() => {};
+  Map<String, Object> toJson() => {'reload': reload};
 
   @override
   Request toRequest(String id) => Request(id, key, toJson());
@@ -101,7 +186,10 @@ class AwaitAnalysisDoneResult implements ResponseResult {
 /// {@endtemplate}
 class SetConfigParams implements RequestParams {
   /// {@macro custom_lint.protocol.set_config_params}
-  SetConfigParams({required this.includeBuiltInLints});
+  SetConfigParams({
+    required this.includeBuiltInLints,
+    required this.watchMode,
+  });
 
   /// Decodes a [SetConfigParams] from a [Request].
   factory SetConfigParams.fromRequest(Request request) {
@@ -112,6 +200,7 @@ class SetConfigParams implements RequestParams {
 
     return SetConfigParams(
       includeBuiltInLints: request.params['include_built_in_lints']! as bool,
+      watchMode: request.params['watch_mode']! as bool,
     );
   }
 
@@ -121,9 +210,15 @@ class SetConfigParams implements RequestParams {
   /// Whether to include custom_lint meta lints about the status of a plugin
   final bool includeBuiltInLints;
 
+  /// Whether the plugin was started in watch mode, and therefore should use hot-reload
+  final bool watchMode;
+
   @override
   Map<String, Object> toJson() {
-    return {'include_built_in_lints': includeBuiltInLints};
+    return {
+      'include_built_in_lints': includeBuiltInLints,
+      'watch_mode': watchMode,
+    };
   }
 
   @override
@@ -157,4 +252,29 @@ class SetConfigResult implements ResponseResult {
 
   @override
   int get hashCode => runtimeType.hashCode;
+}
+
+/// Notifies the server that the linter code has changed.
+@immutable
+class DidHotReloadNotification {
+  /// Notifies the server that the linter code has changed.
+  const DidHotReloadNotification();
+
+  /// Decodes a [PrintNotification] from a [Notification].
+  factory DidHotReloadNotification.fromNotification(Notification notification) {
+    assert(
+      notification.event == key,
+      'Notification is not a $key notification',
+    );
+
+    return const DidHotReloadNotification();
+  }
+
+  /// The unique [Notification.event] key for [DidHotReloadNotification].
+  static const key = 'custom_lint.did_hot_reload';
+
+  /// Converts [DidHotReloadNotification] to a [Notification].
+  Notification toNotification() {
+    return Notification(key, {});
+  }
 }

@@ -1,5 +1,6 @@
 import 'package:analyzer_plugin/protocol/protocol_common.dart';
 import 'package:analyzer_plugin/protocol/protocol_generated.dart';
+import 'package:async/async.dart';
 import 'package:path/path.dart';
 import 'package:test/test.dart';
 
@@ -21,6 +22,8 @@ class _HelloWorldLint extends PluginBase {
   Stream<Lint> getLints(ResolvedUnitResult resolvedUnitResult) async* {
     final library = resolvedUnitResult.libraryElement;
     for (final variable in library.topLevelElements) {
+      if (variable.name == 'ignore') continue;
+
       yield Lint(
         code: 'hello_world',
         message: 'Hello world',
@@ -43,7 +46,7 @@ class _HelloWorldLint extends PluginBase {
 ''';
 
 void main() {
-  test('supports `// ignore: code`', () async {
+  test('supports `// expect_lint: code`', () async {
     final plugin = createPlugin(
       name: 'test_lint',
       main: source,
@@ -51,16 +54,19 @@ void main() {
 
     final app = createLintUsage(
       source: {
+        'lib/empty.dart': '''
+// a file with no lint in it
+
+// expect_lint: some_lint
+void ignore() {}
+''',
         'lib/main.dart': '''
 void fn() {}
 
-// ignore: hello_world, This is some comment foo
+// expect_lint: hello_world, foo, unknown
 void fn2() {}
 
-// ignore: foo, hello_world
-void fn3() {}
-
-// ignore: type=lint, some comment
+// expect_lint: hello_world
 void fn3() {}
 '''
       },
@@ -69,12 +75,13 @@ void fn3() {}
     );
 
     final runner = await startRunnerForApp(app);
+    final lints = StreamQueue(runner.channel.lints);
 
     expect(
-      await runner.channel.lints.first,
+      await lints.next,
       predicate<AnalysisErrorsParams>((value) {
         expect(value.file, join(app.path, 'lib', 'main.dart'));
-        expect(value.errors.length, 3);
+        expect(value.errors.length, 4);
 
         expect(value.errors.first.code, 'hello_world');
         expect(
@@ -91,104 +98,44 @@ void fn3() {}
         expect(value.errors[2].code, 'foo');
         expect(
           value.errors[2].location,
-          Location(value.file, 68, 3, 4, 6, endColumn: 9, endLine: 4),
+          Location(value.file, 104, 3, 7, 6, endColumn: 9, endLine: 7),
         );
+
+        expect(value.errors[3].code, 'unfulfilled_expect_lint');
+        expect(
+          value.errors[3].message,
+          'Expected to find the lint unknown on next line but none found.',
+        );
+        expect(
+          value.errors[3].location,
+          Location(value.file, 48, 7, 3, 35, endColumn: 42, endLine: 3),
+        );
+
         return true;
       }),
     );
-
-    expect(runner.channel.lints, emitsDone);
-
-    // Closing so that previous error matchers relying on stream
-    // closing can complete
-    await runner.close();
-
-    expect(plugin.log.existsSync(), false);
-  });
-
-  test('supports `// ignore_for_file: code`', () async {
-    final plugin = createPlugin(
-      name: 'test_lint',
-      main: source,
-    );
-
-    final app = createLintUsage(
-      source: {
-        'lib/main.dart': '''
-// ignore_for_file: foo, some comment
-
-void fn() {}
-
-// ignore: hello_world
-void fn2() {}
-
-// ignore: foo
-void fn3() {}
-'''
-      },
-      plugins: {'test_lint': plugin.uri},
-      name: 'test_app',
-    );
-
-    final runner = await startRunnerForApp(app);
 
     expect(
-      await runner.channel.lints.first,
+      await lints.next,
       predicate<AnalysisErrorsParams>((value) {
-        expect(value.file, join(app.path, 'lib', 'main.dart'));
-        expect(value.errors.length, 2);
+        expect(value.file, join(app.path, 'lib', 'empty.dart'));
+        expect(value.errors.length, 1);
 
-        expect(value.errors.first.code, 'hello_world');
+        expect(value.errors[0].code, 'unfulfilled_expect_lint');
         expect(
-          value.errors.first.location,
-          Location(value.file, 44, 2, 3, 6, endColumn: 8, endLine: 3),
+          value.errors[0].message,
+          'Expected to find the lint some_lint on next line but none found.',
+        );
+        expect(
+          value.errors[0].location,
+          Location(value.file, 46, 9, 3, 17, endColumn: 26, endLine: 3),
         );
 
-        expect(value.errors[1].code, 'hello_world');
-        expect(
-          value.errors[1].location,
-          Location(value.file, 111, 3, 9, 6, endColumn: 9, endLine: 9),
-        );
         return true;
       }),
     );
 
-    expect(runner.channel.lints, emitsDone);
-
-    // Closing so that previous error matchers relying on stream
-    // closing can complete
-    await runner.close();
-
-    expect(plugin.log.existsSync(), false);
-  });
-
-  test('supports `// ignore_for_file: type=lint`', () async {
-    final plugin = createPlugin(
-      name: 'test_lint',
-      main: source,
-    );
-
-    final app = createLintUsage(
-      source: {
-        'lib/main.dart': '''
-// ignore_for_file: type=lint, some comment
-
-void fn() {}
-
-// ignore: hello_world
-void fn2() {}
-
-// ignore: foo
-void fn3() {}
-'''
-      },
-      plugins: {'test_lint': plugin.uri},
-      name: 'test_app',
-    );
-
-    final runner = await startRunnerForApp(app);
-
-    expect(runner.channel.lints, emitsDone);
+    expect(lints.rest, emitsDone);
 
     // Closing so that previous error matchers relying on stream
     // closing can complete
